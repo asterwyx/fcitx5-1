@@ -12,6 +12,7 @@
 #include <string>
 #include <unordered_map>
 #include "fcitx-utils/event.h"
+#include "fcitx-utils/eventdispatcher.h"
 #include "fcitx-utils/handlertable.h"
 #include "fcitx-utils/misc.h"
 #include "fcitx-utils/trackableobject.h"
@@ -161,8 +162,10 @@ public:
                                            : InputMethodMode::PhysicalKeyboard;
 
     EventLoop eventLoop_;
+    EventDispatcher eventDispatcher_;
     std::unique_ptr<EventSourceIO> signalPipeEvent_;
     std::unique_ptr<EventSourceTime> preloadInputMethodEvent_;
+    std::unique_ptr<EventSourceTime> zombieReaper_;
     std::unique_ptr<EventSource> exitEvent_;
     InputContextManager icManager_;
     AddonManager addonManager_;

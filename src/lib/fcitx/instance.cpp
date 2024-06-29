@@ -10,7 +10,11 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <cstdint>
+#include <ctime>
+#include <memory>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <fmt/format.h>
@@ -18,8 +22,10 @@
 #include "fcitx-config/iniparser.h"
 #include "fcitx-utils/capabilityflags.h"
 #include "fcitx-utils/event.h"
+#include "fcitx-utils/eventdispatcher.h"
 #include "fcitx-utils/i18n.h"
 #include "fcitx-utils/log.h"
+#include "fcitx-utils/macros.h"
 #include "fcitx-utils/misc.h"
 #include "fcitx-utils/standardpath.h"
 #include "fcitx-utils/stringutils.h"
@@ -641,9 +647,10 @@ Instance::Instance(int argc, char **argv) {
     }
 
     // we need fork before this
-    d_ptr.reset(new InstancePrivate(this));
+    d_ptr = std::make_unique<InstancePrivate>(this);
     FCITX_D();
     d->arg_ = arg;
+    d->eventDispatcher_.attach(&d->eventLoop_);
     d->addonManager_.setInstance(this);
     d->addonManager_.setAddonOptions(arg.addonOptions_);
     d->icManager_.setInstance(this);
@@ -971,6 +978,13 @@ Instance::Instance(int argc, char **argv) {
 #ifdef ENABLE_KEYBOARD
             if (keyEvent.forward()) {
                 FCITX_D();
+                // Always let the release key go through, since it shouldn't
+                // produce character. Otherwise it may wrongly trigger wayland
+                // client side repetition.
+                if (keyEvent.isRelease()) {
+                    keyEvent.filter();
+                    return;
+                }
                 auto *inputState = ic->propertyFor(&d->inputStateFactory_);
                 if (auto *xkbState = inputState->customXkbState()) {
                     if (auto utf32 = xkb_state_key_get_utf32(
@@ -986,10 +1000,8 @@ Instance::Instance(int argc, char **argv) {
                                 keyEvent.origKey().sym()) {
                             return;
                         }
-                        if (!keyEvent.isRelease()) {
-                            FCITX_KEYTRACE() << "Will commit char: " << utf32;
-                            ic->commitString(utf8::UCS4ToUTF8(utf32));
-                        }
+                        FCITX_KEYTRACE() << "Will commit char: " << utf32;
+                        ic->commitString(utf8::UCS4ToUTF8(utf32));
                         keyEvent.filterAndAccept();
                     } else if (!keyEvent.key().states().test(KeyState::Ctrl) &&
                                keyEvent.rawKey().sym() !=
@@ -1353,6 +1365,9 @@ void Instance::handleSignal() {
             exit();
         } else if (signo == SIGUSR1) {
             reloadConfig();
+        } else if (signo == SIGCHLD) {
+            d->zombieReaper_->setNextInterval(2000000);
+            d->zombieReaper_->setOneShot();
         }
     }
 }
@@ -1403,6 +1418,15 @@ void Instance::initialize() {
             }
             return false;
         });
+    d->zombieReaper_ = d->eventLoop_.addTimeEvent(
+        CLOCK_MONOTONIC, now(CLOCK_MONOTONIC), 0,
+        [](EventSourceTime *, uint64_t) {
+            pid_t res;
+            while ((res = waitpid(-1, nullptr, WNOHANG)) > 0) {
+            }
+            return false;
+        });
+    d->zombieReaper_->setEnabled(false);
 
     d->exitEvent_ = d->eventLoop_.addExitEvent([this](EventSource *) {
         FCITX_DEBUG() << "Running save...";
@@ -1517,6 +1541,11 @@ InstancePrivate *Instance::privateData() {
 EventLoop &Instance::eventLoop() {
     FCITX_D();
     return d->eventLoop_;
+}
+
+EventDispatcher &Instance::eventDispatcher() {
+    FCITX_D();
+    return d->eventDispatcher_;
 }
 
 InputContextManager &Instance::inputContextManager() {
@@ -2460,6 +2489,14 @@ void Instance::showInputMethodInformation(InputContext *ic) {
         return;
     }
     d->showInputMethodInformation(ic);
+}
+
+void Instance::showCustomInputMethodInformation(InputContext *ic,
+                                                const std::string &message) {
+    FCITX_DEBUG() << "Input method switched";
+    FCITX_D();
+    auto *inputState = ic->propertyFor(&d->inputStateFactory_);
+    inputState->showInputMethodInformation(message);
 }
 
 bool Instance::checkUpdate() const {
